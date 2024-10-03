@@ -3,7 +3,7 @@ yfinance
 pandas
 numpy 
 matplotlib
-eaborn 
+seaborn 
 pypfopt
 riskfolio 
 tensorflow
