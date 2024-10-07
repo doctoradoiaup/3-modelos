@@ -5,97 +5,146 @@ Created on Thu Oct  3 09:02:31 2024
 @author: jperezr
 """
 
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Oct  7 12:53:42 2024
+
+@author: jperezr
+"""
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from pypfopt import EfficientFrontier, risk_models, expected_returns
+from scipy.cluster.hierarchy import linkage, fcluster
+from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
-import seaborn as sns
-from pypfopt.efficient_frontier import EfficientFrontier
-from pypfopt.risk_models import CovarianceShrinkage
-from pypfopt.expected_returns import mean_historical_return
-import riskfolio as rp
-from tensorflow.keras.layers import Input, Dense
-from tensorflow.keras.models import Model
+import cvxpy as cp
 
-# Función para descargar los datos de Yahoo Finance
-def get_data(tickers, start, end):
-    data = yf.download(tickers, start=start, end=end)
-    return data['Adj Close']
+# 1. Cargar los datos de los 10 tickers
+tickers = ['RELIANCE.NS', 'ULTRACEMCO.NS', 'TATASTEEL.NS', 'NTPC.NS', 'JSWSTEEL.NS',
+           'ONGC.NS', 'GRASIM.NS', 'HINDALCO.NS', 'COALINDIA.NS', 'UPL.NS']
 
-# Cargar los datos
-tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "XOM", "CVX", "JPM", "BAC", "WFC"]  # Ejemplo con empresas de diferentes sectores
-start_date = '2018-01-01'
-end_date = '2022-12-31'
+start_train = "2018-01-01"
+end_train = "2021-12-31"
+start_test = "2022-01-01"
+end_test = "2022-12-31"
 
-st.title('Optimización de Portafolio Comparativa: MVP, HRP, y Autoencoder')
-data = get_data(tickers, start_date, end_date)
-st.write("Datos de precios históricos:", data.head())
+# Obtener los datos históricos
+st.write("Cargando datos de Yahoo Finance...")
+data_train = yf.download(tickers, start=start_train, end=end_train)['Adj Close']
+data_test = yf.download(tickers, start=start_test, end=end_test)['Adj Close']
 
-# Cálculo de retornos y matriz de covarianza
-returns = data.pct_change().dropna()
-mean_returns = mean_historical_return(data)
-cov_matrix = CovarianceShrinkage(returns).ledoit_wolf()
+st.write("Datos de entrenamiento")
+st.dataframe(data_train)
 
-# --- Modelo MVP (Media-Varianza) ---
-st.subheader("Optimización de Media-Varianza (MVP)")
-ef = EfficientFrontier(mean_returns, cov_matrix)
-weights_mvp = ef.max_sharpe()
-performance_mvp = ef.portfolio_performance()
-st.write(f"Pesos MVP: {weights_mvp}")
-st.write(f"Desempeño MVP: {performance_mvp}")
+st.write("Datos de prueba")
+st.dataframe(data_test)
 
-# --- Modelo HRP usando riskfolio-lib ---
-st.subheader("Optimización de Paridad de Riesgo Jerárquica (HRP) con riskfolio-lib")
+# Cálculo de rendimientos utilizando precios ajustados
+returns_train = data_train.pct_change().dropna()
+returns_test = data_test.pct_change().dropna()
 
-# Crear el portafolio y calcular estadísticas
-port = rp.Portfolio(returns=returns)
-method_mu = 'hist'  # Usar media histórica
-method_cov = 'hist'  # Usar covarianza histórica
-port.assets_stats(method_mu=method_mu, method_cov=method_cov)
-
-# Optimización HRP
-weights_hrp = port.optimization(model='HRP', codependence='pearson', rm='MV', rf=0, linkage='ward')
-performance_hrp = port.performance(weights_hrp, rm=method_cov, rf=0, alpha=0.05)
-
-st.write(f"Pesos HRP: {weights_hrp}")
-st.write(f"Desempeño HRP: {performance_hrp}")
-
-# --- Modelo Autoencoder ---
-st.subheader("Optimización basada en Autoencoder")
-def build_autoencoder(input_shape):
-    input_layer = Input(shape=(input_shape,))
-    encoder = Dense(5, activation="relu")(input_layer)
-    decoder = Dense(input_shape, activation="linear")(encoder)
-    autoencoder = Model(input_layer, decoder)
-    autoencoder.compile(optimizer="adam", loss="mse")
-    return autoencoder
-
-# Construir y entrenar el autoencoder
-autoencoder = build_autoencoder(returns.shape[1])
-autoencoder.fit(returns.values, returns.values, epochs=100, batch_size=10, verbose=0)
-
-# Obtener los pesos del autoencoder
-encoded_weights = autoencoder.predict(returns.mean().values.reshape(1, -1)).flatten()
-encoded_weights = encoded_weights / np.sum(encoded_weights)  # Normalizamos los pesos
-performance_enc = np.dot(encoded_weights, mean_returns.values), np.sqrt(np.dot(encoded_weights.T, np.dot(cov_matrix, encoded_weights)))
-
-st.write(f"Pesos Autoencoder: {encoded_weights}")
-st.write(f"Desempeño Autoencoder: {performance_enc}")
-
-# --- Comparación de Resultados ---
-st.subheader("Comparación de Resultados")
-st.write("Desempeño MVP:", performance_mvp)
-st.write("Desempeño HRP:", performance_hrp)
-st.write("Desempeño Autoencoder:", performance_enc)
-
-# Gráfica comparativa de los portafolios
-performance_data = {
-    'Modelo': ['MVP', 'HRP', 'Autoencoder'],
-    'Retorno': [performance_mvp[0], performance_hrp[0], performance_enc[0]],
-    'Volatilidad': [performance_mvp[1], performance_hrp[1], performance_enc[1]]
+# Ponderaciones iniciales del índice sectorial del sector de materias primas
+initial_weights = {
+    'RELIANCE.NS': 10.13,
+    'ULTRACEMCO.NS': 7.52,
+    'TATASTEEL.NS': 7.52,
+    'NTPC.NS': 7.26,
+    'JSWSTEEL.NS': 5.64,
+    'ONGC.NS': 5.32,
+    'GRASIM.NS': 5.31,
+    'HINDALCO.NS': 5.23,
+    'COALINDIA.NS': 4.05,
+    'UPL.NS': 3.32
 }
-df_performance = pd.DataFrame(performance_data)
-st.write(sns.barplot(x='Modelo', y='Retorno', data=df_performance))
-plt.title('Comparación de Retornos')
-st.pyplot()
+
+# Normalizar las ponderaciones iniciales a porcentaje (100%)
+initial_weights_normalized = {k: v / 100 for k, v in initial_weights.items()}
+
+# 2. Implementar el Modelo MVP
+st.write("**Modelo MVP (Mean-Variance Portfolio)**")
+mu = expected_returns.mean_historical_return(data_train).values
+S = risk_models.sample_cov(data_train)
+
+# Definir las variables de decisión
+weights = cp.Variable(len(tickers))
+
+# Definir la función objetivo: minimizar la varianza del portafolio
+risk = cp.quad_form(weights, S)
+objective = cp.Minimize(risk)
+
+# Agregar restricciones
+constraints = [
+    cp.sum(weights) == 1,  # La suma de los pesos debe ser 1
+    weights >= 0            # No se permiten posiciones cortas
+]
+
+# Problema de optimización
+problem = cp.Problem(objective, constraints)
+
+# Resolver el problema
+try:
+    problem.solve()
+except Exception as e:
+    st.error(f"Ocurrió un error al resolver el problema: {e}")
+    st.stop()
+
+# Verificar si la solución es válida
+if weights.value is None:
+    st.error("No se pudo encontrar una solución válida para el modelo MVP.")
+else:
+    # Obtener los pesos optimizados
+    cleaned_weights_mvp = {tickers[i]: weights.value[i] for i in range(len(tickers))}
+    st.write("Pesos MVP:", cleaned_weights_mvp)
+
+# 3. Implementar el Modelo HRP
+st.write("**Modelo HRP (Hierarchical Risk Parity)**")
+cov_matrix = returns_train.cov()
+
+# Enlace jerárquico y creación de clusters
+corr_matrix = returns_train.corr()
+dist = 1 - corr_matrix
+Z = linkage(dist, 'ward')
+cluster_labels = fcluster(Z, 10, criterion='maxclust')
+
+# Asignación de pesos HRP (inverso de la varianza) respetando las ponderaciones iniciales
+hrp_weights = {}
+for i in np.unique(cluster_labels):
+    cluster_indices = np.where(cluster_labels == i)[0]
+    cluster_cov = cov_matrix.iloc[cluster_indices, cluster_indices]
+    inv_var_weights = 1 / np.diag(cluster_cov)
+    inv_var_weights /= inv_var_weights.sum()
+    for j, idx in enumerate(cluster_indices):
+        hrp_weights[data_train.columns[idx]] = inv_var_weights[j] * initial_weights_normalized[data_train.columns[idx]]
+
+st.write("Pesos HRP:", hrp_weights)
+
+# 4. Implementar el Modelo ENC (Autoencoder)
+st.write("**Modelo ENC (Autoencoder-based Portfolio)**")
+# Usar PCA como sustituto del autoencoder para simplificar
+pca = PCA(n_components=5)
+pca.fit(returns_train)
+pca_weights = np.abs(pca.components_).sum(axis=0)
+pca_weights /= pca_weights.sum()
+
+enc_weights = {ticker: weight * initial_weights_normalized[ticker] for ticker, weight in zip(tickers, pca_weights)}
+st.write("Pesos ENC:", enc_weights)
+
+# 5. Mostrar la tabla comparativa de los 3 modelos
+st.write("**Comparación de Pesos**")
+weights_df = pd.DataFrame({
+    'Tickers': tickers,
+    'Pesos MVP': [cleaned_weights_mvp.get(ticker, 0) if weights.value is not None else 0 for ticker in tickers],
+    'Pesos HRP': [hrp_weights.get(ticker, 0) for ticker in tickers],
+    'Pesos ENC': [enc_weights.get(ticker, 0) for ticker in tickers]
+})
+
+st.write(weights_df)
+
+# Gráfico de las ponderaciones
+st.write("**Gráfico de Ponderaciones**")
+weights_df.set_index('Tickers', inplace=True)
+weights_df.plot(kind='bar', figsize=(10, 6))
+st.pyplot(plt)
