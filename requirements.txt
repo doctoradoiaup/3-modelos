@@ -1,7 +1,7 @@
-streamlit as st
-yfinance as yf
-pandas as pd
-numpy as np
+streamlit 
+yfinance 
+pandas 
+numpy 
 pypfopt
 scipy
 sklearn
